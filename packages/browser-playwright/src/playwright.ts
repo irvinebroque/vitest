@@ -7,6 +7,7 @@ import type {
   BrowserContext,
   BrowserContextOptions,
   ConnectOptions,
+  ConnectOverCDPOptions,
   Frame,
   FrameLocator,
   LaunchOptions,
@@ -41,6 +42,20 @@ const debug = createDebugger('vitest:browser:playwright')
 const playwrightBrowsers = ['firefox', 'webkit', 'chromium'] as const
 type PlaywrightBrowser = (typeof playwrightBrowsers)[number]
 
+export interface PlaywrightRunnerContext {
+  url: string
+  sessionId: string
+  parallel: boolean
+  browserName: PlaywrightBrowser
+}
+
+export interface PlaywrightRunnerOptions {
+  resolveUrl?: (context: PlaywrightRunnerContext) => string | Promise<string>
+  waitForReady?: (context: PlaywrightRunnerContext) => void | Promise<void>
+}
+
+export type PlaywrightContextStrategy = 'new' | 'reuse-default-on-failure'
+
 // Enable intercepting of requests made by service workers - experimental API is only available in Chromium based browsers
 // Requests from service workers are only available on context.route() https://playwright.dev/docs/service-workers-experimental
 process.env.PW_EXPERIMENTAL_SERVICE_WORKER_NETWORK_EVENTS ??= '1'
@@ -63,6 +78,28 @@ export interface PlaywrightProviderOptions {
   connectOptions?: ConnectOptions & {
     wsEndpoint: string
   }
+  /**
+   * The options passed down to [`playwright.chromium.connectOverCDP`](https://playwright.dev/docs/api/class-browsertype#browser-type-connect-over-cdp) method.
+   *
+   * This is Chromium-only and connects to an existing browser via the Chrome DevTools Protocol.
+   * @see {@link https://playwright.dev/docs/api/class-browsertype#browser-type-connect-over-cdp}
+   */
+  connectOverCDPOptions?: ConnectOverCDPOptions & {
+    wsEndpoint: string
+  }
+  /**
+   * Hooks for preparing and rewriting the Vitest browser runner URL before navigation.
+   */
+  runner?: PlaywrightRunnerOptions
+  /**
+   * Controls how browser contexts are created.
+   *
+   * The default `new` strategy requires `browser.newContext()` to succeed. The
+   * `reuse-default-on-failure` strategy falls back to `browser.contexts()[0]`,
+   * useful for CDP services that only expose a default context.
+   * @default 'new'
+   */
+  contextStrategy?: PlaywrightContextStrategy
   /**
    * The options passed down to [`browser.newContext`](https://playwright.dev/docs/api/class-browser#browser-new-context) method.
    * @see {@link https://playwright.dev/docs/api/class-browser#browser-new-context}
@@ -169,7 +206,26 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     this.browserPromise = (async () => {
       const options = this.project.config.browser
 
+      if (this.options.connectOptions && this.options.connectOverCDPOptions) {
+        throw new Error(`Cannot use both connectOptions and connectOverCDPOptions.`)
+      }
+
+      if (this.options.connectOverCDPOptions && this.browserName !== 'chromium') {
+        throw new Error(`connectOverCDPOptions can only be used with the chromium browser.`)
+      }
+
+      if (this.options.connectOverCDPOptions && this.options.persistentContext) {
+        throw new Error(`persistentContext cannot be used with connectOverCDPOptions.`)
+      }
+
       const playwright = await import('playwright')
+
+      if (this.options.connectOverCDPOptions) {
+        const { wsEndpoint, ...connectOverCDPOptions } = this.options.connectOverCDPOptions
+        this.browser = await playwright.chromium.connectOverCDP(wsEndpoint, connectOverCDPOptions)
+        this.browserPromise = null
+        return this.browser
+      }
 
       const launchOptions: LaunchOptions = {
         ...this.options.launchOptions,
@@ -418,7 +474,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     // if UI is disabled, keep the iframe scale to 1
     // options.viewport ??= this.project.config.browser.viewport
     // }
-    const context = this.persistentContext ?? await browser.newContext(options)
+    const context = this.persistentContext ?? await this.createBrowserContext(browser, options)
     await this._throwIfClosing(context)
     if (actionTimeout != null) {
       context.setDefaultTimeout(actionTimeout)
@@ -426,6 +482,23 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
     debug?.('[%s][%s] the context is ready', sessionId, this.browserName)
     this.contexts.set(sessionId, context)
     return context
+  }
+
+  private async createBrowserContext(browser: Browser, options: BrowserContextOptions): Promise<BrowserContext> {
+    try {
+      return await browser.newContext(options)
+    }
+    catch (error) {
+      if (this.options.contextStrategy !== 'reuse-default-on-failure') {
+        throw error
+      }
+
+      const context = browser.contexts()[0]
+      if (!context) {
+        throw new Error(`Failed to create a new Playwright context and no default context is available to reuse.`, { cause: error })
+      }
+      return context
+    }
   }
 
   private getContextOptions(): BrowserContextOptions {
@@ -520,8 +593,19 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
   async openPage(sessionId: string, url: string, options: { parallel: boolean }): Promise<void> {
     debug?.('[%s][%s] creating the browser page for %s', sessionId, this.browserName, url)
     const browserPage = await this.openBrowserPage(sessionId, options)
-    debug?.('[%s][%s] browser page is created, opening %s', sessionId, this.browserName, url)
-    await browserPage.goto(url, { timeout: 0 })
+    await this._throwIfClosing(browserPage)
+    const runnerContext: PlaywrightRunnerContext = {
+      url,
+      sessionId,
+      parallel: options.parallel,
+      browserName: this.browserName,
+    }
+    await this.options.runner?.waitForReady?.(runnerContext)
+    await this._throwIfClosing(browserPage)
+    const resolvedUrl = await this.options.runner?.resolveUrl?.(runnerContext) ?? url
+    await this._throwIfClosing(browserPage)
+    debug?.('[%s][%s] browser page is created, opening %s', sessionId, this.browserName, resolvedUrl)
+    await browserPage.goto(resolvedUrl, { timeout: 0 })
     await this._throwIfClosing(browserPage)
   }
 
@@ -565,7 +649,7 @@ export class PlaywrightBrowserProvider implements BrowserProvider {
       await this.persistentContext.close()
     }
     else {
-      await Promise.all(Array.from(this.contexts.values(), c => c.close()))
+      await Promise.all(Array.from(new Set(this.contexts.values()), c => c.close()))
     }
     this.contexts.clear()
     await browser?.close()
