@@ -6,6 +6,7 @@ import { resolveOptimizerConfig } from './utils'
 
 export function ModuleRunnerTransform(): VitePlugin {
   let testConfig: NonNullable<UserConfig['test']>
+  const managedEnvironmentNames = new Set<string>()
   const noExternal: (string | RegExp)[] = []
   const external: (string | RegExp)[] = []
   let noExternalAll = false
@@ -20,9 +21,7 @@ export function ModuleRunnerTransform(): VitePlugin {
 
         config.environments ??= {}
 
-        const names = new Set(Object.keys(config.environments))
-        names.add('client')
-        names.add('ssr')
+        const names = new Set(['client', 'ssr'])
 
         const pool = config.test?.pool
         if (pool === 'vmForks' || pool === 'vmThreads') {
@@ -61,6 +60,7 @@ export function ModuleRunnerTransform(): VitePlugin {
           config.environments[name] ??= {}
 
           const environment = config.environments[name]
+          managedEnvironmentNames.add(name)
           environment.dev ??= {}
           // vm tests run using the native import mechanism
           if (name === '__vitest_vm__') {
@@ -82,8 +82,12 @@ export function ModuleRunnerTransform(): VitePlugin {
           return
         }
 
-        config.resolve ??= {}
-        const envNoExternal = resolveViteResolveOptions('noExternal', config.resolve, testConfig.deps?.moduleDirectories)
+        if (!managedEnvironmentNames.has(name)) {
+          return
+        }
+
+        const resolve = { ...config.resolve }
+        const envNoExternal = resolveViteResolveOptions('noExternal', resolve, testConfig.deps?.moduleDirectories)
         if (envNoExternal === true) {
           noExternalAll = true
         }
@@ -91,27 +95,30 @@ export function ModuleRunnerTransform(): VitePlugin {
           noExternal.push(...envNoExternal)
         }
 
-        const envExternal = resolveViteResolveOptions('external', config.resolve, testConfig.deps?.moduleDirectories)
+        const envExternal = resolveViteResolveOptions('external', resolve, testConfig.deps?.moduleDirectories)
         if (envExternal !== true && envExternal.length) {
           external.push(...envExternal)
         }
 
         // remove Vite's externalization logic because we have our own (unfortunately)
-        config.resolve.external = [
-          ...builtinModules,
-          ...builtinModules.map(m => `node:${m}`),
-        ]
-
-        // by setting `noExternal` to `true`, we make sure that
-        // Vite will never use its own externalization mechanism
-        // to externalize modules and always resolve static imports
-        // in both SSR and Client environments
-        config.resolve.noExternal = true
-
-        config.optimizeDeps = resolveOptimizerConfig(
-          testConfig?.deps?.optimizer?.[name],
-          config.optimizeDeps,
-        )
+        return {
+          resolve: {
+            ...resolve,
+            external: [
+              ...builtinModules,
+              ...builtinModules.map(m => `node:${m}`),
+            ],
+            // by setting `noExternal` to `true`, we make sure that
+            // Vite will never use its own externalization mechanism
+            // to externalize modules and always resolve static imports
+            // in both SSR and Client environments
+            noExternal: true,
+          },
+          optimizeDeps: resolveOptimizerConfig(
+            testConfig?.deps?.optimizer?.[name],
+            config.optimizeDeps,
+          ),
+        }
       },
     },
     configResolved: {

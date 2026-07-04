@@ -15,6 +15,7 @@ import { parse, stringify } from 'flatted'
 import { dirname, join, resolve } from 'pathe'
 import { createDebugger, isFileLoadingAllowed, isValidApiRequest } from 'vitest/node'
 import { WebSocketServer } from 'ws'
+import { BROWSER_RPC_PROTOCOL } from '../constants'
 
 const debug = createDebugger('vitest:browser:api')
 
@@ -24,7 +25,12 @@ export function setupBrowserRpc(globalServer: ParentBrowserProject, defaultMocke
   const vite = globalServer.vite
   const vitest = globalServer.vitest
 
-  const wss = new WebSocketServer({ noServer: true })
+  const wss = new WebSocketServer({
+    noServer: true,
+    handleProtocols(protocols) {
+      return protocols.has(BROWSER_RPC_PROTOCOL) ? BROWSER_RPC_PROTOCOL : false
+    },
+  })
 
   vite.httpServer?.on('upgrade', (request, socket: Duplex, head: Buffer) => {
     if (!request.url) {
@@ -90,15 +96,15 @@ export function setupBrowserRpc(globalServer: ParentBrowserProject, defaultMocke
       const clients = type === 'tester' ? state.testers : state.orchestrators
       clients.set(rpcId, rpc)
 
-      debug?.('[%s] Browser API connected to %s', rpcId, type)
+      debug?.('[%s] Browser API connected to %s with protocol %s', rpcId, type, ws.protocol || '<none>')
 
-      ws.on('close', () => {
-        debug?.('[%s] Browser API disconnected from %s', rpcId, type)
+      ws.on('close', (code, reason) => {
+        debug?.('[%s] Browser API disconnected from %s with code %d and reason %s', rpcId, type, code, reason.toString() || '<none>')
         offCancel()
         clients.delete(rpcId)
         globalServer.removeCDPHandler(rpcId)
         if (type === 'orchestrator') {
-          sessions.destroySession(sessionId)
+          sessions.scheduleDestroySession(sessionId)
         }
         // this will reject any hanging methods if there are any
         rpc.$close(

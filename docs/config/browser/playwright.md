@@ -151,6 +151,59 @@ export default defineConfig({
 ```
 :::
 
+## connectOverCDPOptions
+
+These options are directly passed down to [`playwright.chromium.connectOverCDP`](https://playwright.dev/docs/api/class-browsertype#browser-type-connect-over-cdp). CDP connections are Chromium-only and attach to an already-running browser, so `launchOptions` are not applied.
+
+Use `connectOverCDPOptions.wsEndpoint` to connect Vitest Browser Mode to a Chromium CDP endpoint:
+
+```ts [vitest.config.ts]
+import { playwright } from '@vitest/browser-playwright'
+import { defineConfig } from 'vitest/config'
+
+export default defineConfig({
+  test: {
+    browser: {
+      provider: playwright({
+        connectOverCDPOptions: {
+          wsEndpoint: 'wss://example.com/devtools/browser',
+          headers: {
+            Authorization: `Bearer ${process.env.API_TOKEN}`,
+          },
+          timeout: 30_000,
+        },
+      }),
+      instances: [{ browser: 'chromium' }],
+    },
+  },
+})
+```
+
+Remote browsers sometimes cannot reach the local Vitest runner URL. Use `runner.waitForReady` to wait for local infrastructure, and `runner.resolveUrl` to rewrite the URL before Playwright navigates:
+
+```ts [vitest.config.ts]
+provider: playwright({
+  connectOverCDPOptions: {
+    wsEndpoint: 'wss://example.com/devtools/browser',
+  },
+  runner: {
+    waitForReady: async ({ url }) => waitForLocalRunner(url),
+    resolveUrl: async ({ url }) => publicRunnerUrl(url),
+  },
+})
+```
+
+Some CDP services expose only a default context and reject `browser.newContext()`. Set `contextStrategy: 'reuse-default-on-failure'` to reuse `browser.contexts()[0]` if creating a new context fails:
+
+```ts [vitest.config.ts]
+provider: playwright({
+  connectOverCDPOptions: {
+    wsEndpoint: 'wss://example.com/devtools/browser',
+  },
+  contextStrategy: 'reuse-default-on-failure',
+})
+```
+
 ## contextOptions
 
 Vitest creates a new context for every test file by calling [`browser.newContext()`](https://playwright.dev/docs/api/class-browsercontext). You can configure this behaviour by specifying [custom arguments](https://playwright.dev/docs/api/class-browser#browser-new-context).
