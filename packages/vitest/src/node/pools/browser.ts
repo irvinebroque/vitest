@@ -6,7 +6,7 @@ import type { Vitest } from '../core'
 import type { ProcessPool } from '../pool'
 import type { TestProject } from '../project'
 import type { TestSpecification } from '../test-specification'
-import type { BrowserProvider } from '../types/browser'
+import type { BrowserOrchestrator, BrowserProvider } from '../types/browser'
 import crypto from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import * as nodeos from 'node:os'
@@ -41,8 +41,10 @@ export function createBrowserPool(vitest: Vitest): ProcessPool {
 
     debug?.('creating pool for project %s', project.name)
 
+    const maxWorkers = getThreadsCount(project)
     const pool: BrowserPool = new BrowserPool(project, {
-      maxWorkers: getThreadsCount(project),
+      maxWorkers,
+      sessionStartupConcurrency: getSessionStartupConcurrency(project, maxWorkers),
     })
     projectPools.set(project, pool)
     vitest.onCancel(() => {
@@ -183,10 +185,21 @@ function escapePathToRegexp(path: string): string {
   return path.replace(/[/\\.?*()^${}|[\]+]/g, '\\$&')
 }
 
-class BrowserPool {
+function getSessionStartupConcurrency(project: TestProject, maxWorkers: number): number {
+  const concurrency = Number(project.config.browser.sessionStartupConcurrency)
+
+  if (!Number.isFinite(concurrency)) {
+    return maxWorkers
+  }
+
+  return Math.min(maxWorkers, Math.max(1, Math.floor(concurrency)))
+}
+
+export class BrowserPool {
   private _queue: FileSpecification[] = []
   private _promise: DeferPromise<void> | undefined
   private _providedContext: string | undefined
+  private openingSessions = new Set<string>()
 
   private readySessions: Set<string>
 
@@ -200,8 +213,10 @@ class BrowserPool {
     private project: TestProject,
     private options: {
       maxWorkers: number
+      sessionStartupConcurrency?: number
     },
   ) {
+    this.options.sessionStartupConcurrency ??= getSessionStartupConcurrency(project, this.options.maxWorkers)
     this._traces = project.vitest._traces
     this._otel = this._traces.startContextSpan('vitest.browser')
     this._otel.span.setAttributes({
@@ -213,6 +228,7 @@ class BrowserPool {
 
   public cancel(): void {
     this._queue = []
+    this.openingSessions.clear()
     this._otel.span.end()
   }
 
@@ -222,7 +238,7 @@ class BrowserPool {
     this.cancel()
   }
 
-  get orchestrators() {
+  get orchestrators(): Map<string, BrowserOrchestrator> {
     return this.project.browser!.state.orchestrators
   }
 
@@ -246,25 +262,25 @@ class BrowserPool {
       }
     })
 
-    if (this.orchestrators.size >= this.options.maxWorkers) {
-      debug?.('all orchestrators are ready, not creating more')
-      return this._promise
-    }
+    this.openSessions(method)
+    return this._promise
+  }
 
-    // open the minimum amount of tabs
-    // if there is only 1 file running, we don't need 8 tabs running
-    const workerCount = Math.min(
-      this.options.maxWorkers - this.orchestrators.size,
-      files.length,
-    )
+  private openSessions(method: 'run' | 'collect'): void {
+    const startupConcurrency = this.options.sessionStartupConcurrency!
 
-    const promises: Promise<void>[] = []
-    for (let i = 0; i < workerCount; i++) {
+    while (
+      this._promise
+      && this._queue.length > this.openingSessions.size
+      && this.openingSessions.size < startupConcurrency
+      && this.orchestrators.size + this.openingSessions.size < this.options.maxWorkers
+    ) {
       const sessionId = crypto.randomUUID()
+      this.openingSessions.add(sessionId)
       this.project.vitest._browserSessions.sessionIds.add(sessionId)
       const project = this.project.name
       debug?.('[%s] creating session for %s', sessionId, project)
-      const page = this._traces.$(
+      this._traces.$(
         `vitest.browser.open`,
         {
           context: this._otel.context,
@@ -272,16 +288,24 @@ class BrowserPool {
             'vitest.browser.session_id': sessionId,
           },
         },
-        () => this.openPage(sessionId, { parallel: workerCount > 1 }),
+        () => this.openPage(sessionId, { parallel: this.options.maxWorkers > 1 }),
       ).then(() => {
-        // start running tests on the page when it's ready
-        this.runNextTest(method, sessionId)
+        this.openingSessions.delete(sessionId)
+
+        if (!this._promise) {
+          return
+        }
+
+        // The first tester iframe is part of cold startup; ramp again only after
+        // a session completes work so startup bursts don't cascade.
+        this.runNextTest(method, sessionId, false)
+      }).catch((error) => {
+        this.openingSessions.delete(sessionId)
+        if (this._promise) {
+          this.reject(error)
+        }
       })
-      promises.push(page)
     }
-    await Promise.all(promises)
-    debug?.('all sessions are created')
-    return this._promise
   }
 
   private async openPage(sessionId: string, options: { parallel: boolean }): Promise<void> {
@@ -318,7 +342,7 @@ class BrowserPool {
     return concurrencyId
   }
 
-  private getOrchestrator(sessionId: string) {
+  private getOrchestrator(sessionId: string): BrowserOrchestrator {
     const orchestrator = this.orchestrators.get(sessionId)
     if (!orchestrator) {
       throw new Error(`Orchestrator not found for session ${sessionId}. This is a bug in Vitest. Please, open a new issue with reproduction.`)
@@ -330,7 +354,11 @@ class BrowserPool {
     this.readySessions.add(sessionId)
 
     // the last worker finished running tests
-    if (this.readySessions.size === this.orchestrators.size) {
+    if (
+      this._queue.length === 0
+      && this.openingSessions.size === 0
+      && this.readySessions.size === this.orchestrators.size
+    ) {
       this._otel.span.end()
       this._promise?.resolve()
       this._promise = undefined
@@ -345,7 +373,7 @@ class BrowserPool {
     }
   }
 
-  private runNextTest(method: 'run' | 'collect', sessionId: string): void {
+  private runNextTest(method: 'run' | 'collect', sessionId: string, allowSessionRamp = true): void {
     const file = this._queue.shift()
 
     if (!file) {
@@ -373,6 +401,9 @@ class BrowserPool {
 
     const orchestrator = this.getOrchestrator(sessionId)
     debug?.('[%s] run test %s', sessionId, file)
+    if (allowSessionRamp) {
+      this.openSessions(method)
+    }
 
     this.setBreakpoint(sessionId, file.filepath).then(() => {
       // this starts running tests inside the orchestrator
@@ -428,7 +459,7 @@ class BrowserPool {
     }).catch(err => this.reject(err))
   }
 
-  async setBreakpoint(sessionId: string, file: string) {
+  async setBreakpoint(sessionId: string, file: string): Promise<void> {
     if (!this.project.config.inspector.waitForDebugger) {
       return
     }

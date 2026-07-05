@@ -640,7 +640,7 @@ export class TestProject {
       sessionId,
       this,
       pool,
-      { otelCarrier },
+      { otelCarrier, url: url.toString() },
     )
     const pagePromise = this.browser.provider.openPage(
       sessionId,

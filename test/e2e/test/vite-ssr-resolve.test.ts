@@ -316,6 +316,42 @@ describe.each(['deprecated', 'environment'] as const)('VitestResolver with Vite 
   })
 })
 
+test('does not overwrite resolve options for third-party Vite environments', async () => {
+  let environments: any
+  const captureConfig: Plugin = {
+    name: 'capture-config',
+    configResolved(config) {
+      environments = config.environments
+    },
+  }
+
+  const ctx = await createVitest('test', {
+    watch: false,
+  }, {
+    plugins: [captureConfig],
+    environments: {
+      worker: {
+        consumer: 'client',
+        resolve: {
+          external: ['worker-external'],
+          noExternal: ['worker-no-external'],
+        },
+      },
+    },
+    test: {},
+  })
+  onTestFinished(() => ctx.close())
+
+  expect(environments.worker.resolve.external).toEqual(['worker-external'])
+  expect(environments.worker.resolve.noExternal).toEqual(['worker-no-external'])
+  expect(environments.ssr.resolve.external).toContain('fs')
+  expect(environments.ssr.resolve.external).toContain('node:fs')
+  expect(environments.ssr.resolve.noExternal).toBe(true)
+  expect(environments.client.resolve.external).toContain('fs')
+  expect(environments.client.resolve.external).toContain('node:fs')
+  expect(environments.client.resolve.noExternal).toBe(true)
+})
+
 async function getResolver(
   style: 'environment' | 'deprecated',
   options: CliOptions,

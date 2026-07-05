@@ -82,3 +82,11 @@ export interface BrowserProvider {
   close: () => Awaitable<void>
 }
 ```
+
+## Browser RPC WebSocket Marker <Badge type="danger">advanced</Badge> {#browser-rpc-websocket-marker}
+
+Vitest Browser Mode connects the browser runner back to the dev server through an internal WebSocket endpoint. Browser RPC clients request the `vitest-browser-rpc` WebSocket subprotocol when connecting to `/__vitest_browser_api__`.
+
+This marker is internal to Vitest, but stable enough for Vite plugins and dev-server middleware to identify Vitest-owned Browser Mode RPC upgrades and pass them through. Plugins should not implement the protocol; they should only use it to avoid confusing Vitest Browser Mode RPC connections with application WebSockets.
+
+For compatibility, Vitest still accepts Browser RPC clients that do not request this subprotocol.

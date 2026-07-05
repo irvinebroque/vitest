@@ -6,6 +6,7 @@ import type { WebSocketBrowserEvents, WebSocketBrowserHandlers } from '../types'
 import type { IframeOrchestrator } from './orchestrator'
 import { createBirpc } from 'birpc'
 import { parse, stringify } from 'flatted'
+import { BROWSER_RPC_PROTOCOL } from '../constants'
 import { getBrowserState } from './utils'
 
 const PAGE_TYPE = getBrowserState().type
@@ -20,6 +21,10 @@ const METHOD = getBrowserState().method
 export const ENTRY_URL: string = `${
   location.protocol === 'https:' ? 'wss:' : 'ws:'
 }//${HOST}/__vitest_browser_api__?type=${PAGE_TYPE}&rpcId=${RPC_ID}&sessionId=${getBrowserState().sessionId}&projectName=${encodeURIComponent(getBrowserState().config.name || '')}&method=${METHOD}&token=${(window as any).VITEST_API_TOKEN || '0'}`
+
+function createBrowserRpcWebSocket(): WebSocket {
+  return new WebSocket(ENTRY_URL, BROWSER_RPC_PROTOCOL)
+}
 
 const onCancelCallbacks: ((reason: CancelReason) => void)[] = []
 
@@ -74,7 +79,7 @@ function createClient() {
   let tries = reconnectTries
 
   const ctx: VitestBrowserClient = {
-    ws: new WebSocket(ENTRY_URL),
+    ws: createBrowserRpcWebSocket(),
     waitForConnection,
   } as VitestBrowserClient
 
@@ -146,7 +151,7 @@ function createClient() {
     if (reset) {
       tries = reconnectTries
     }
-    ctx.ws = new WebSocket(ENTRY_URL)
+    ctx.ws = createBrowserRpcWebSocket()
     registerWS()
   }
 
