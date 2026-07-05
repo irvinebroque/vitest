@@ -407,6 +407,10 @@ export const cliOptionsConfig: VitestCLIOptions = {
         description: 'If connection to the browser takes longer, the test suite will fail (default: `60_000`)',
         argument: '<timeout>',
       },
+      sessionStartupConcurrency: {
+        description: 'Maximum number of browser sessions Vitest should open at the same time (default: `maxWorkers`)',
+        argument: '<workers>',
+      },
       trackUnhandledErrors: {
         description: 'Control if Vitest catches uncaught exceptions so they can be reported (default: `true`)',
       },

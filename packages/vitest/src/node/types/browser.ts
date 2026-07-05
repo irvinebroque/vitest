@@ -116,6 +116,7 @@ export interface BrowserInstanceOption extends
     | 'testerHtmlPath'
     | 'screenshotDirectory'
     | 'screenshotFailures'
+    | 'sessionStartupConcurrency'
   > {
   /**
    * Name of the browser
@@ -321,6 +322,16 @@ export interface BrowserConfigOptions {
    * @default 30000
    */
   connectTimeout?: number
+
+  /**
+   * Maximum number of browser sessions that Vitest should open at the same time.
+   *
+   * This only limits startup. Once sessions are ready, Vitest can still run test
+   * files up to the configured `maxWorkers` limit.
+   *
+   * @default maxWorkers
+   */
+  sessionStartupConcurrency?: number
 
   expect?: {
     toMatchScreenshot?: {

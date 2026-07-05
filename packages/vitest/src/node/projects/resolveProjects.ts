@@ -349,6 +349,7 @@ function cloneConfig(project: TestProject, { browser, ...config }: BrowserInstan
     headless,
     screenshotDirectory,
     screenshotFailures,
+    sessionStartupConcurrency,
     fileParallelism,
     // @ts-expect-error remove just in case
     browser: _browser,
@@ -373,6 +374,7 @@ function cloneConfig(project: TestProject, { browser, ...config }: BrowserInstan
       testerHtmlPath: testerHtmlPath ?? currentConfig.testerHtmlPath,
       screenshotDirectory: screenshotDirectory ?? currentConfig.screenshotDirectory,
       screenshotFailures: screenshotFailures ?? currentConfig.screenshotFailures,
+      sessionStartupConcurrency: sessionStartupConcurrency ?? currentConfig.sessionStartupConcurrency,
       headless: headless ?? currentConfig.headless,
       provider: provider ?? currentConfig.provider,
       fileParallelism: fileParallelism ?? currentConfig.fileParallelism,
